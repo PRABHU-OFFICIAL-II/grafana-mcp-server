@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.grafana-session.json
+.env
+*.har
+.claude

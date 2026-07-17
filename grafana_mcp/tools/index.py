@@ -1,0 +1,296 @@
+import time
+from typing import Any, Dict, List, Optional
+
+from mcp.server import Server
+from mcp.types import TextContent, Tool
+
+from grafana_mcp.auth.manager import get_session, init_session, inject_session, SessionExpiredError
+from grafana_mcp.auth.session import load_session
+from grafana_mcp.grafana.api import (
+    list_folders, list_dashboards, get_dashboard,
+    get_label_values, query_metrics, get_alert_rules, list_datasources,
+)
+from grafana_mcp.parser.metrics import parse_query_result, detect_anomalies, format_metrics_table
+
+
+def _text(content: str) -> list:
+    return [TextContent(type="text", text=content)]
+
+
+async def _resolve_datasource(ds_ref: Optional[Dict], template_vars: List[Dict], all_ds: List[Dict]) -> Optional[Dict]:
+    if not ds_ref or not ds_ref.get("uid"):
+        return None
+    uid = ds_ref["uid"]
+
+    if uid.startswith("$"):
+        var_name = uid.lstrip("$").strip("{}")
+        var = next((v for v in template_vars if v.get("name") == var_name), None)
+        resolved_name = var.get("current", {}).get("value") if var else None
+        if resolved_name and isinstance(resolved_name, str):
+            found = next((d for d in all_ds if d.get("name") == resolved_name or d.get("uid") == resolved_name), None)
+            if found:
+                return {"uid": found["uid"], "type": found["type"]}
+        fallback = next((d for d in all_ds if d.get("type") == "prometheus"), None)
+        return {"uid": fallback["uid"], "type": fallback["type"]} if fallback else None
+
+    found = next((d for d in all_ds if d.get("uid") == uid), None)
+    if found:
+        return {"uid": found["uid"], "type": found["type"]}
+    by_type = next((d for d in all_ds if d.get("type") == ds_ref.get("type", "prometheus")), None)
+    return {"uid": by_type["uid"], "type": by_type["type"]} if by_type else None
+
+
+def register_tools(server: Server) -> None:
+
+    # ── Auth tools ────────────────────────────────────────────────────────────
+
+    @server.call_tool()
+    async def call_tool(name: str, arguments: Dict[str, Any]) -> list:
+        if name == "login":
+            session = await init_session(arguments["username"], arguments["password"])
+            from datetime import datetime, timezone
+            exp = datetime.fromtimestamp(session.expires_at / 1000, tz=timezone.utc).isoformat()
+            return _text(f"✅ Logged in successfully. Session expires at {exp}.")
+
+        elif name == "inject_session":
+            s = inject_session(arguments["grafana_session"], arguments["expires_at_unix_seconds"] * 1000)
+            from datetime import datetime, timezone
+            exp = datetime.fromtimestamp(s.expires_at / 1000, tz=timezone.utc).isoformat()
+            return _text(f"✅ Session injected. Expires at {exp}")
+
+        elif name == "auth_status":
+            session = load_session()
+            if not session:
+                return _text("❌ No active session. Call login tool first.")
+            expires_in = round((session.expires_at - int(time.time() * 1000)) / 60000)
+            if expires_in > 0:
+                return _text(f"✅ Session active. Expires in {expires_in} minutes.")
+            return _text(f"❌ Session expired {abs(expires_in)} minutes ago. Call login tool.")
+
+        # ── Discovery tools ───────────────────────────────────────────────────
+
+        elif name == "list_folders":
+            folders = await list_folders()
+            lines = [f"  {f['uid'].ljust(22)} {f['title']}" for f in folders]
+            header = f"Found {len(folders)} folders:\n\nUID                    Title\n{'─' * 60}"
+            return _text(f"{header}\n" + "\n".join(lines))
+
+        elif name == "list_dashboards":
+            dashboards = await list_dashboards(arguments["folder_uid"])
+            lines = [f"  {d['uid'].ljust(22)} {d['title']}" for d in dashboards]
+            header = f"Found {len(dashboards)} dashboards in folder {arguments['folder_uid']}:\n\nUID                    Title\n{'─' * 60}"
+            return _text(f"{header}\n" + "\n".join(lines))
+
+        elif name == "get_dashboard_info":
+            dashboard = await get_dashboard(arguments["dashboard_uid"])
+            panels = dashboard.get("panels", [])
+            vars_ = dashboard.get("templating", {}).get("list", [])
+            panel_lines = []
+            for p in panels:
+                targets = p.get("targets", [])
+                line = f"  [id:{p.get('id')}] \"{p.get('title')}\" (type: {p.get('type')})"
+                if targets:
+                    line += f"\n    queries: {', '.join(t.get('refId','') for t in targets)}"
+                panel_lines.append(line)
+            var_lines = [
+                f"  {v.get('name')} ({v.get('type')})"
+                + (f" = {v['current']['value']}" if v.get('current', {}).get('value') else "")
+                for v in vars_
+            ]
+            parts = [
+                f"Dashboard: {dashboard.get('title')}",
+                f"Tags: {', '.join(dashboard.get('tags', [])) or 'none'}",
+                f"Refresh: {dashboard.get('refresh', '')}",
+                "",
+                f"Template Variables ({len(var_lines)}):",
+                "\n".join(var_lines) or "  (none)",
+                "",
+                f"Panels ({len(panels)}):",
+                "\n".join(panel_lines),
+            ]
+            return _text("\n".join(p for p in parts if p is not None))
+
+        elif name == "get_label_values":
+            now_ms = int(time.time() * 1000)
+            values = await get_label_values(
+                arguments["datasource_uid"],
+                arguments["label_name"],
+                arguments.get("matchers", []),
+                now_ms - 3 * 60 * 60 * 1000,
+                now_ms,
+            )
+            return _text(f"Label \"{arguments['label_name']}\" has {len(values)} values:\n" + "\n".join(f"  {v}" for v in values))
+
+        # ── Metrics tools ─────────────────────────────────────────────────────
+
+        elif name == "query_metrics":
+            range_min = arguments.get("range_minutes", 60)
+            to_ms = int(time.time() * 1000)
+            from_ms = to_ms - range_min * 60 * 1000
+            result = await query_metrics(
+                arguments["datasource_uid"],
+                arguments.get("datasource_type", "prometheus"),
+                [{"refId": "A", "expr": arguments["expr"],
+                  "legendFormat": arguments.get("legend_format", ""),
+                  "intervalMs": 60000, "maxDataPoints": 300}],
+                from_ms, to_ms,
+            )
+            parsed = parse_query_result(result)
+            return _text(
+                f"Query: {arguments['expr']}\nRange: last {range_min} minutes\n\nResults:\n"
+                + format_metrics_table(parsed)
+            )
+
+        elif name == "detect_anomalies":
+            range_min = arguments.get("range_minutes", 60)
+            to_ms = int(time.time() * 1000)
+            from_ms = to_ms - range_min * 60 * 1000
+            result = await query_metrics(
+                arguments["datasource_uid"],
+                arguments.get("datasource_type", "prometheus"),
+                [{"refId": "A", "expr": arguments["expr"], "intervalMs": 60000, "maxDataPoints": 300}],
+                from_ms, to_ms,
+            )
+            parsed = parse_query_result(result)
+            report = detect_anomalies(parsed, arguments.get("metric_type", "auto"))
+            lines = [
+                f"Anomaly Detection — last {range_min} minutes",
+                f"Query: {arguments['expr']}",
+                "",
+                report.summary,
+            ]
+            if report.has_anomalies:
+                lines.append(f"\nAnomalies ({len(report.anomalies)}):")
+                for a in report.anomalies:
+                    lines.append(f"  [{a.severity.upper()}] {a.message}\n  Labels: {a.labels}")
+            lines.append("\nMetric values:")
+            lines.append(format_metrics_table(parsed))
+            return _text("\n".join(lines))
+
+        elif name == "check_dashboard_health":
+            range_min = arguments.get("range_minutes", 60)
+            filters = arguments.get("filters", {})
+            dashboard, all_ds = await _fetch_dashboard_and_ds(arguments["dashboard_uid"])
+            to_ms = int(time.time() * 1000)
+            from_ms = to_ms - range_min * 60 * 1000
+            lines = [f"Health Check: {dashboard.get('title')}", f"Range: last {range_min} minutes", ""]
+            anomaly_count = 0
+            template_vars = dashboard.get("templating", {}).get("list", [])
+            for panel in dashboard.get("panels", []):
+                if not panel.get("title") or panel.get("type") == "row":
+                    continue
+                targets = [t for t in panel.get("targets", []) if t.get("expr")]
+                if not targets:
+                    continue
+                ds_ref = panel.get("datasource") or (targets[0].get("datasource") if targets else None)
+                ds = await _resolve_datasource(ds_ref, template_vars, all_ds)
+                if not ds:
+                    lines.append(f"Panel: {panel['title']} — ⚠️ could not resolve datasource")
+                    lines.append("")
+                    continue
+                try:
+                    queries = []
+                    for t in targets:
+                        expr = t.get("expr", "")
+                        if filters and "{" in expr:
+                            filter_str = ",".join(f'{k}="{v}"' for k, v in filters.items())
+                            expr = expr.replace("{", "{" + filter_str + ",", 1)
+                        queries.append({"refId": t["refId"], "expr": expr, "legendFormat": t.get("legendFormat", "")})
+                    result = await query_metrics(ds["uid"], ds["type"], queries, from_ms, to_ms)
+                    parsed = parse_query_result(result)
+                    report = detect_anomalies(parsed, "auto")
+                    lines.append(f"Panel: {panel['title']}")
+                    lines.append(f"  {report.summary}")
+                    if report.has_anomalies:
+                        anomaly_count += len(report.anomalies)
+                    lines.append("")
+                except Exception as e:
+                    lines.append(f"Panel: {panel['title']} — ⚠️ query failed: {e}")
+                    lines.append("")
+            status = (f"🔴 {anomaly_count} anomalies detected" if anomaly_count else "✅ All panels healthy — no anomalies detected")
+            lines.insert(0, status)
+            return _text("\n".join(lines))
+
+        elif name == "get_alert_rules":
+            result = await get_alert_rules(arguments["dashboard_uid"])
+            if result.get("status") != "success" or not result.get("data", {}).get("groups"):
+                return _text("No alert rules found for this dashboard.")
+            lines = []
+            for group in result["data"]["groups"]:
+                lines.append(f"Group: {group['name']}")
+                for rule in group.get("rules", []):
+                    lines.append(f"  Rule: {rule['name']} [{rule['state']}]")
+                    for alert in rule.get("alerts", []):
+                        lines.append(f"    Alert: {alert['state']} — {alert['labels']}")
+            return _text("\n".join(lines))
+
+        else:
+            return _text(f"Unknown tool: {name}")
+
+    @server.list_tools()
+    async def list_tools() -> List[Tool]:
+        return [
+            Tool(name="login", description="Authenticate with Grafana via OKTA. Sends an Okta Verify push to your phone.",
+                 inputSchema={"type": "object", "properties": {
+                     "username": {"type": "string", "description": "OKTA username / email"},
+                     "password": {"type": "string", "description": "OKTA password"},
+                 }, "required": ["username", "password"]}),
+            Tool(name="inject_session", description="Manually inject a Grafana session cookie from browser DevTools.",
+                 inputSchema={"type": "object", "properties": {
+                     "grafana_session": {"type": "string"},
+                     "expires_at_unix_seconds": {"type": "number"},
+                 }, "required": ["grafana_session", "expires_at_unix_seconds"]}),
+            Tool(name="auth_status", description="Check current authentication status and session expiry.",
+                 inputSchema={"type": "object", "properties": {}}),
+            Tool(name="list_folders", description="List all Grafana dashboard folders.",
+                 inputSchema={"type": "object", "properties": {}}),
+            Tool(name="list_dashboards", description="List all dashboards inside a specific folder.",
+                 inputSchema={"type": "object", "properties": {
+                     "folder_uid": {"type": "string", "description": "Folder UID from list_folders"},
+                 }, "required": ["folder_uid"]}),
+            Tool(name="get_dashboard_info", description="Get full dashboard definition including panels, variables, and datasource info.",
+                 inputSchema={"type": "object", "properties": {
+                     "dashboard_uid": {"type": "string"},
+                 }, "required": ["dashboard_uid"]}),
+            Tool(name="get_label_values", description="Get available values for a Prometheus label.",
+                 inputSchema={"type": "object", "properties": {
+                     "datasource_uid": {"type": "string"},
+                     "label_name": {"type": "string"},
+                     "matchers": {"type": "array", "items": {"type": "string"}},
+                 }, "required": ["datasource_uid", "label_name"]}),
+            Tool(name="query_metrics", description="Run a PromQL query against a Grafana datasource.",
+                 inputSchema={"type": "object", "properties": {
+                     "datasource_uid": {"type": "string"},
+                     "datasource_type": {"type": "string", "default": "prometheus"},
+                     "expr": {"type": "string"},
+                     "legend_format": {"type": "string"},
+                     "range_minutes": {"type": "number", "default": 60},
+                 }, "required": ["datasource_uid", "expr"]}),
+            Tool(name="detect_anomalies", description="Query a PromQL expression and detect spikes or threshold breaches.",
+                 inputSchema={"type": "object", "properties": {
+                     "datasource_uid": {"type": "string"},
+                     "datasource_type": {"type": "string", "default": "prometheus"},
+                     "expr": {"type": "string"},
+                     "metric_type": {"type": "string", "enum": ["cpu", "memory", "threads", "response_time", "auto"], "default": "auto"},
+                     "range_minutes": {"type": "number", "default": 60},
+                 }, "required": ["datasource_uid", "expr"]}),
+            Tool(name="check_dashboard_health", description="Run a full health check on a dashboard — queries all panels and reports anomalies.",
+                 inputSchema={"type": "object", "properties": {
+                     "dashboard_uid": {"type": "string"},
+                     "range_minutes": {"type": "number", "default": 60},
+                     "filters": {"type": "object", "additionalProperties": {"type": "string"}},
+                 }, "required": ["dashboard_uid"]}),
+            Tool(name="get_alert_rules", description="Get active Grafana alert rules for a dashboard.",
+                 inputSchema={"type": "object", "properties": {
+                     "dashboard_uid": {"type": "string"},
+                 }, "required": ["dashboard_uid"]}),
+        ]
+
+
+async def _fetch_dashboard_and_ds(dashboard_uid: str):
+    import asyncio
+    dashboard, all_ds = await asyncio.gather(
+        get_dashboard(dashboard_uid),
+        list_datasources(),
+    )
+    return dashboard, all_ds

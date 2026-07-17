@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Grafana MCP Server — stdio and HTTP/SSE modes."""
+
+import asyncio
+import os
+import sys
+
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+
+from grafana_mcp.auth.manager import get_session, SessionExpiredError
+from grafana_mcp.config import config
+from grafana_mcp.tools.index import register_tools
+
+MODE = os.environ.get("MCP_MODE", "stdio")
+PORT = int(os.environ.get("MCP_PORT", 3001))
+HOST = os.environ.get("MCP_HOST", "0.0.0.0")
+
+
+async def warm_up_session() -> None:
+    try:
+        session = await get_session()
+        expires_in = round((session.expires_at - __import__("time").time() * 1000) / 60000)
+        print(f"[grafana-mcp] Session loaded, expires in {expires_in} minutes", file=sys.stderr)
+    except SessionExpiredError:
+        print("[grafana-mcp] No active session — call the 'login' tool to authenticate", file=sys.stderr)
+
+
+async def start_stdio() -> None:
+    server = Server("grafana-mcp-server")
+    register_tools(server)
+    await warm_up_session()
+    print("[grafana-mcp] Running on stdio", file=sys.stderr)
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream, server.create_initialization_options())
+
+
+async def start_http() -> None:
+    from mcp.server.sse import SseServerTransport
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+    from starlette.routing import Mount, Route
+    import uvicorn
+
+    server = Server("grafana-mcp-server")
+    register_tools(server)
+    await warm_up_session()
+
+    sse = SseServerTransport("/messages/")
+
+    async def handle_sse(request: Request):
+        async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
+            await server.run(streams[0], streams[1], server.create_initialization_options())
+
+    async def handle_messages(request: Request):
+        await sse.handle_post_message(request.scope, request.receive, request._send)
+
+    async def health(request: Request):
+        return JSONResponse({"status": "ok", "mode": "http", "grafana": config.grafana.base_url})
+
+    app = Starlette(routes=[
+        Route("/health", health),
+        Route("/sse", handle_sse),
+        Mount("/messages/", app=handle_messages),
+    ])
+
+    print(f"[grafana-mcp] HTTP/SSE server on http://{HOST}:{PORT}", file=sys.stderr)
+    config_uv = uvicorn.Config(app, host=HOST, port=PORT, log_level="error")
+    server_uv = uvicorn.Server(config_uv)
+    await server_uv.serve()
+
+
+async def main() -> None:
+    print(f"[grafana-mcp] Starting in {MODE} mode — targeting {config.grafana.base_url}", file=sys.stderr)
+    if MODE == "http":
+        await start_http()
+    else:
+        await start_stdio()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
