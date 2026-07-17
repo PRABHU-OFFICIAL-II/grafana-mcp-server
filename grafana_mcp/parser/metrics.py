@@ -131,6 +131,16 @@ def detect_anomalies(metrics: List[ParsedMetric], metric_type: str) -> AnomalyRe
                     message=f"Response time {current:.0f}ms exceeds {t.response_time_ms:.0f}ms",
                 ))
 
+            # error_rate: value expected as a ratio (0–1) or percentage (0–100)
+            error_pct = current * 100 if current <= 1 else current
+            if metric_type in ("error_rate", "auto") and error_pct >= t.error_rate:
+                anomalies.append(Anomaly(
+                    type="error_rate",
+                    severity="critical" if error_pct >= t.error_rate * 2 else "warning",
+                    metric=metric_type, current=error_pct, threshold=t.error_rate, labels=labels,
+                    message=f"Error rate {error_pct:.2f}% exceeds threshold {t.error_rate:.1f}%",
+                ))
+
             if series.avg > 0 and current > series.avg * 2 and current > series.max * 0.9:
                 anomalies.append(Anomaly(
                     type="spike", severity="warning",

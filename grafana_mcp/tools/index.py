@@ -9,6 +9,8 @@ from grafana_mcp.auth.session import load_session
 from grafana_mcp.grafana.api import (
     list_folders, list_dashboards, get_dashboard,
     get_label_values, query_metrics, get_alert_rules, list_datasources,
+    search_dashboards, get_firing_alerts, create_annotation, create_snapshot,
+    query_logs,
 )
 from grafana_mcp.parser.metrics import parse_query_result, detect_anomalies, format_metrics_table
 
@@ -46,6 +48,16 @@ def register_tools(server: Server) -> None:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: Dict[str, Any]) -> list:
+        try:
+            return await _dispatch(name, arguments)
+        except SessionExpiredError:
+            return _text("Session expired. Call the login tool to re-authenticate.")
+        except RuntimeError as e:
+            return _text(f"Grafana API error: {e}")
+        except Exception as e:
+            return _text(f"Error executing {name}: {type(e).__name__}: {e}")
+
+    async def _dispatch(name: str, arguments: Dict[str, Any]) -> list:
         if name == "login":
             session = await init_session(arguments["username"], arguments["password"])
             from datetime import datetime, timezone
@@ -192,9 +204,13 @@ def register_tools(server: Server) -> None:
                     queries = []
                     for t in targets:
                         expr = t.get("expr", "")
-                        if filters and "{" in expr:
+                        if filters:
                             filter_str = ",".join(f'{k}="{v}"' for k, v in filters.items())
-                            expr = expr.replace("{", "{" + filter_str + ",", 1)
+                            if "{" in expr:
+                                expr = expr.replace("{", "{" + filter_str + ",", 1)
+                            else:
+                                # Bare metric name — append label selector
+                                expr = f"{expr}{{{filter_str}}}"
                         queries.append({"refId": t["refId"], "expr": expr, "legendFormat": t.get("legendFormat", "")})
                     result = await query_metrics(ds["uid"], ds["type"], queries, from_ms, to_ms)
                     parsed = parse_query_result(result)
@@ -223,6 +239,103 @@ def register_tools(server: Server) -> None:
                     for alert in rule.get("alerts", []):
                         lines.append(f"    Alert: {alert['state']} — {alert['labels']}")
             return _text("\n".join(lines))
+
+        elif name == "query_logs":
+            range_min = arguments.get("range_minutes", 60)
+            to_ms = int(time.time() * 1000)
+            from_ms = to_ms - range_min * 60 * 1000
+            result = await query_logs(
+                datasource_uid=arguments["datasource_uid"],
+                expr=arguments["expr"],
+                from_ms=from_ms,
+                to_ms=to_ms,
+                limit=arguments.get("limit", 100),
+                direction=arguments.get("direction", "backward"),
+            )
+            streams = result.get("data", {}).get("result", [])
+            if not streams:
+                return _text(f"No logs found for query: {arguments['expr']}")
+            lines = [f"Logs — last {range_min} minutes", f"Query: {arguments['expr']}", ""]
+            total = 0
+            for stream in streams:
+                stream_labels = stream.get("stream", {})
+                label_str = " ".join(f'{k}={v}' for k, v in stream_labels.items())
+                lines.append(f"Stream: {label_str}")
+                for ts_ns, log_line in stream.get("values", []):
+                    from datetime import datetime, timezone
+                    ts_sec = int(ts_ns) / 1e9
+                    ts_str = datetime.fromtimestamp(ts_sec, tz=timezone.utc).strftime("%H:%M:%S")
+                    lines.append(f"  [{ts_str}] {log_line}")
+                    total += 1
+            lines.append(f"\nTotal: {total} log lines across {len(streams)} stream(s)")
+            return _text("\n".join(lines))
+
+        elif name == "create_snapshot":
+            result = await create_snapshot(
+                dashboard_uid=arguments["dashboard_uid"],
+                name=arguments.get("name"),
+                expires_seconds=arguments.get("expires_seconds", 3600),
+            )
+            url = result.get("url") or result.get("externalUrl", "")
+            delete_url = result.get("deleteUrl", "")
+            key = result.get("key", "")
+            lines = [f"Snapshot created successfully.", f"Key: {key}"]
+            if url:
+                lines.append(f"View: {url}")
+            if delete_url:
+                lines.append(f"Delete: {delete_url}")
+            return _text("\n".join(lines))
+
+        elif name == "create_annotation":
+            result = await create_annotation(
+                text=arguments["text"],
+                tags=arguments.get("tags", []),
+                dashboard_uid=arguments.get("dashboard_uid"),
+                panel_id=arguments.get("panel_id"),
+                time_ms=arguments.get("time_ms"),
+                time_end_ms=arguments.get("time_end_ms"),
+            )
+            annotation_id = result.get("id", result.get("message", "unknown"))
+            return _text(f"Annotation created (id: {annotation_id}): {arguments['text']}")
+
+        elif name == "get_firing_alerts":
+            alerts = await get_firing_alerts(state=arguments.get("state"))
+            if not alerts:
+                return _text("No firing alerts found.")
+            lines = [f"Found {len(alerts)} alert(s):"]
+            for a in alerts:
+                labels = a.get("labels", {})
+                annotations = a.get("annotations", {})
+                status = a.get("status", {})
+                name_str = labels.get("alertname", "(unknown)")
+                state_str = status.get("state", "unknown")
+                severity = labels.get("severity", "")
+                summary = annotations.get("summary", annotations.get("message", ""))
+                lines.append(f"\n  [{state_str.upper()}] {name_str}" + (f" (severity: {severity})" if severity else ""))
+                if summary:
+                    lines.append(f"    {summary}")
+                starts_at = a.get("startsAt", "")
+                if starts_at:
+                    lines.append(f"    Firing since: {starts_at}")
+                dashboard_uid = labels.get("grafana_folder", "") or annotations.get("__dashboardUid__", "")
+                if dashboard_uid:
+                    lines.append(f"    Dashboard: {dashboard_uid}")
+            return _text("\n".join(lines))
+
+        elif name == "search_dashboards":
+            results = await search_dashboards(
+                query=arguments.get("query", ""),
+                tags=arguments.get("tags", []),
+            )
+            lines = [f"  {d.get('uid', '').ljust(22)} {d.get('folderTitle', 'General').ljust(20)} {d.get('title', '')}" for d in results]
+            header = f"Found {len(results)} dashboards:\n\nUID                    Folder               Title\n{'─' * 70}"
+            return _text(f"{header}\n" + "\n".join(lines))
+
+        elif name == "list_datasources":
+            datasources = await list_datasources()
+            lines = [f"  {d.get('uid', '').ljust(22)} {d.get('type', '').ljust(16)} {d.get('name', '')}" for d in datasources]
+            header = f"Found {len(datasources)} datasources:\n\nUID                    Type             Name\n{'─' * 70}"
+            return _text(f"{header}\n" + "\n".join(lines))
 
         else:
             return _text(f"Unknown tool: {name}")
@@ -271,7 +384,7 @@ def register_tools(server: Server) -> None:
                      "datasource_uid": {"type": "string"},
                      "datasource_type": {"type": "string", "default": "prometheus"},
                      "expr": {"type": "string"},
-                     "metric_type": {"type": "string", "enum": ["cpu", "memory", "threads", "response_time", "auto"], "default": "auto"},
+                     "metric_type": {"type": "string", "enum": ["cpu", "memory", "threads", "error_rate", "response_time", "auto"], "default": "auto"},
                      "range_minutes": {"type": "number", "default": 60},
                  }, "required": ["datasource_uid", "expr"]}),
             Tool(name="check_dashboard_health", description="Run a full health check on a dashboard — queries all panels and reports anomalies.",
@@ -284,6 +397,40 @@ def register_tools(server: Server) -> None:
                  inputSchema={"type": "object", "properties": {
                      "dashboard_uid": {"type": "string"},
                  }, "required": ["dashboard_uid"]}),
+            Tool(name="list_datasources", description="List all configured Grafana datasources with their UID, type, and name.",
+                 inputSchema={"type": "object", "properties": {}}),
+            Tool(name="query_logs", description="Run a LogQL query against a Loki datasource and return log lines.",
+                 inputSchema={"type": "object", "properties": {
+                     "datasource_uid": {"type": "string", "description": "UID of the Loki datasource"},
+                     "expr": {"type": "string", "description": "LogQL query expression"},
+                     "range_minutes": {"type": "number", "default": 60, "description": "How many minutes back to query"},
+                     "limit": {"type": "number", "default": 100, "description": "Max number of log lines to return"},
+                     "direction": {"type": "string", "enum": ["backward", "forward"], "default": "backward"},
+                 }, "required": ["datasource_uid", "expr"]}),
+            Tool(name="create_snapshot", description="Create a shareable snapshot of a dashboard's current state and return its URL.",
+                 inputSchema={"type": "object", "properties": {
+                     "dashboard_uid": {"type": "string", "description": "UID of the dashboard to snapshot"},
+                     "name": {"type": "string", "description": "Optional name for the snapshot"},
+                     "expires_seconds": {"type": "number", "description": "Seconds until snapshot expires (default 3600)", "default": 3600},
+                 }, "required": ["dashboard_uid"]}),
+            Tool(name="create_annotation", description="Create a Grafana annotation to mark an event (deploy, incident, etc.) on dashboards.",
+                 inputSchema={"type": "object", "properties": {
+                     "text": {"type": "string", "description": "Annotation text/description"},
+                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags to categorize the annotation"},
+                     "dashboard_uid": {"type": "string", "description": "Scope annotation to a specific dashboard"},
+                     "panel_id": {"type": "number", "description": "Scope annotation to a specific panel"},
+                     "time_ms": {"type": "number", "description": "Start time in Unix milliseconds (defaults to now)"},
+                     "time_end_ms": {"type": "number", "description": "End time in Unix milliseconds (for range annotations)"},
+                 }, "required": ["text"]}),
+            Tool(name="get_firing_alerts", description="Get all currently firing alerts across all dashboards from Alertmanager.",
+                 inputSchema={"type": "object", "properties": {
+                     "state": {"type": "string", "enum": ["active", "suppressed", "unprocessed"], "description": "Filter by alert state (omit for all)"},
+                 }}),
+            Tool(name="search_dashboards", description="Search dashboards across all folders by title or tag.",
+                 inputSchema={"type": "object", "properties": {
+                     "query": {"type": "string", "description": "Title search string (partial match)"},
+                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Filter by dashboard tags"},
+                 }}),
         ]
 
 
