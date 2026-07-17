@@ -97,7 +97,7 @@ The only recurring manual action is re-running the `login` tool the next morning
 
 ---
 
-## Session File Format
+## Session File Formats
 
 `.grafana-session.json` (auto-managed, do not edit by hand):
 ```json
