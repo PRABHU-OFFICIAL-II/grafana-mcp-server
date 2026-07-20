@@ -29,16 +29,133 @@ Run these in parallel at the start of every diagnostic session:
 ```
 mcp__grafana__list_datasources          → discover ALL available Prometheus/datasource UIDs
 mcp__grafana__list_folders              → discover ALL dashboard folders
-mcp__grafana__get_label_values(datasource_uid="000000001", label_name="namespace")   → all k8s namespaces
+mcp__grafana__get_label_values(datasource_uid="000000001", label_name="namespace")   → all k8s namespaces (AWS)
 mcp__grafana__get_label_values(datasource_uid="000000001", label_name="job")         → all Prometheus jobs
-mcp__grafana__get_label_values(datasource_uid="000000001", label_name="pod")         → all pod names (sample)
 ```
 
 Use this discovery output to:
 1. **Identify the correct namespace(s)** for the user's request — do not default to `.*taskflow.*` unless the user explicitly mentions taskflow
-2. **Identify the correct datasource UID** — if metrics return 0.000 on `000000001`, try the other discovered datasource UIDs
+2. **Identify the correct datasource UID** — if the pod/namespace has `az` in its name it is an Azure pod and requires an Azure datasource, NOT `000000001`
 3. **Identify dashboards** relevant to the request by matching folder names and dashboard titles to keywords in the user's question
 4. **Map pod patterns** — e.g. "DS queue" → look for pods matching `.*obm.*`, `.*ds.*`, `.*queue.*`; "CAI" → `application-integration-*`; "taskflow" → `.*taskflow.*`
+
+---
+
+### CRITICAL — Cloud-to-Datasource mapping
+
+**`000000001` (aws-uswest2) covers AWS namespaces ONLY.** Any namespace or pod containing `az`, `gcp`, or `oci` in the name will return 0.000 on `000000001`. Always check the pod/namespace name first to select the correct cloud datasource.
+
+#### Quick routing — read the pod/namespace name prefix:
+
+| Name contains | Cloud | Primary datasource UID | Datasource name |
+|---|---|---|---|
+| `az` (azusw1, azemc1, azusw3, azapse1, azapauc1, azcac2, azntt, azeus1, etc.) | Azure | `tE-7Jyd4z` | azure-prod-all-regions |
+| `gcp` (gcpusw1, gcpmec2, gcpemw2, gcpapac, gcpbr1, etc.) | GCP | `ts2296v4z` | gcp-prod-all-regions |
+| `oci` (ociuse1, ociapac, ocibr1, ociemw2, etc.) | OCI | `d6fc012f-aa8e-43f8-866a-1a97e289abee` | oci-prod-all-regions |
+| no cloud prefix (usw1, usw3, usw5, nac1, nausw, icinq, etc.) | AWS | `000000001` | aws-uswest2 |
+| not specified / unknown | ALL | query `vi-L5FKMz` + `tE-7Jyd4z` + `ts2296v4z` + `d6fc012f-aa8e-43f8-866a-1a97e289abee` in parallel |  |
+
+#### Full datasource UID reference by cloud:
+
+**AWS datasources:**
+| UID | Name | Scope |
+|---|---|---|
+| `000000001` | aws-uswest2 | US West 2 only (prod primary) |
+| `vi-L5FKMz` | aws-prod-all-regions | All AWS prod regions |
+| `OTJGilHGk` | aws-prod-usw2 | US West 2 prod |
+| `Xr_9pMH4k` | aws-prod-usw4 | US West 4 prod |
+| `iHVk-8HMz` | aws-prod-nac1 | NA Central 1 prod |
+| `oPDfFRH4z` | aws-prod-euc1 | EU Central 1 prod |
+| `LHnYSuH4z` | aws-prod-eus1 | EU South 1 prod |
+| `2ZDuXRH4z` | aws-prod-apac | APAC prod |
+| `tFW_0RH4z` | aws-prod-br1 | Brazil 1 prod |
+| `nZRUcrH4z` | aws-prod-nausw | NA US West (iCinq) |
+| `P-J0fWH4z` | aws-prod-icinq | iCinq cluster |
+| `jWuBJL9Mz` | aws-stage | AWS staging |
+| `4_bKJL9Mz` | aws-stage-usw2 | US West 2 staging |
+| `ZpDdJL9Mz` | aws-preview | AWS preview |
+
+**Azure datasources:**
+| UID | Name | Scope |
+|---|---|---|
+| `tE-7Jyd4z` | azure-prod-all-regions | **All Azure prod regions — use this for any `az*` namespace** |
+| `65bC8KpMk` | azure-ichs-westus2 | Azure US West 2 (ICHS cluster) |
+| `P0n9WqsMz` | azure-ichs-useast | Azure US East |
+| `CjF7eKp4z` | azure-prod-azusw1 | AKS US West 1 prod |
+| `Dk8HfLP5z` | azure-prod-azusw3 | AKS US West 3 prod |
+| `EL9IgMQ6z` | azure-prod-azemc1 | AKS EU Middle Central 1 |
+| `FM0JhNR7z` | azure-prod-azemc2 | AKS EU Middle Central 2 |
+| `GN1KiOS8z` | azure-prod-azapse1 | AKS AP Southeast 1 |
+| `HO2LjPT9z` | azure-prod-azapauc1 | AKS AP Australia Central 1 |
+| `befsvadqv60owf` | azure-infacloud-westus2 | Azure staging (West US 2) |
+
+**GCP datasources:**
+| UID | Name | Scope |
+|---|---|---|
+| `ts2296v4z` | gcp-prod-all-regions | **All GCP prod regions — use this for any `gcp*` namespace** |
+| `gcp-usw1-uid` | gcp-prod-gcpusw1 | GKE US West 1 |
+| `gcp-mec2-uid` | gcp-prod-gcpmec2 | GKE Middle East Central 2 |
+| `gcp-emw2-uid` | gcp-prod-gcpemw2 | GKE Europe Middle West 2 |
+
+**OCI datasources:**
+| UID | Name | Scope |
+|---|---|---|
+| `d6fc012f-aa8e-43f8-866a-1a97e289abee` | oci-prod-all-regions | **All OCI prod regions — use this for any `oci*` namespace** |
+
+**Other / shared datasources:**
+| UID | Name | Type | Notes |
+|---|---|---|---|
+| `grafanacloud-logs` | Grafana Cloud Logs | Loki | Log aggregation |
+| `grafanacloud-traces` | Grafana Cloud Traces | Tempo | Distributed tracing |
+| *(multiple)* | CloudWatch | CloudWatch | AWS CloudWatch metrics |
+| *(multiple)* | Stackdriver | Stackdriver | GCP Stackdriver metrics |
+
+#### Namespace patterns by cloud and service:
+
+**AWS namespaces** (datasource `000000001` / `vi-L5FKMz`):
+- `cai-prod-usw1`, `cai-prod-usw3`, `cai-prod-usw5` — CAI prod US West
+- `cai-prod-nac1` — CAI prod NA Central
+- `cai-prod-euc1` — CAI prod EU Central
+- `cai-prod-eus1` — CAI prod EU South
+- `cai-prod-apac` — CAI prod APAC
+- `cai-prod-br1` — CAI prod Brazil
+- `cai-prod-nausw1`, `cai-prod-icinq1usw1` — iCinq / iCinq-specific cluster
+- `taskflow-prod-usw1`, `taskflow-prod-usw3`, `taskflow-prod-usw5` — Taskflow prod
+- `taskflow-prod-nac1`, `taskflow-prod-euc1` — Taskflow other regions
+- `iics-prod-nausw*`, `iics-prod-icinq*` — IICS prod
+- `cai-stage-usw1`, `taskflow-stage-usw1` — Staging
+- `cai-preview-usw1`, `taskflow-preview-*` — Preview / C360
+
+**Azure namespaces** (datasource `tE-7Jyd4z` / `65bC8KpMk`):
+- `cai-prod-azusw1`, `cai-prod-azusw3` — CAI prod AKS US West
+- `cai-prod-azemc1`, `cai-prod-azemc2` — CAI prod AKS EU Middle Central
+- `cai-prod-azapse1` — CAI prod AKS AP Southeast
+- `cai-prod-azapauc1` — CAI prod AKS AP Australia Central
+- `cai-prod-azcac2` — CAI prod AKS Canada Central
+- `cai-prod-azntt` — CAI prod AKS North Taiwan
+- `taskflow-prod-azusw1`, `taskflow-prod-azusw3` — Taskflow prod AKS US West
+- `taskflow-prod-azemc1`, `taskflow-prod-azapse1` — Taskflow prod AKS other regions
+- `iics-prod-azusw1`, `iics-prod-azemc1` — IICS prod AKS
+
+**GCP namespaces** (datasource `ts2296v4z`):
+- `cai-prod-gcpusw1` — CAI prod GKE US West 1
+- `cai-prod-gcpmec2` — CAI prod GKE Middle East Central 2
+- `cai-prod-gcpemw2` — CAI prod GKE Europe Middle West 2
+- `taskflow-prod-gcpusw1`, `taskflow-prod-gcpmec2` — Taskflow prod GKE
+
+**OCI namespaces** (datasource `d6fc012f-aa8e-43f8-866a-1a97e289abee`):
+- `cai-prod-ociuse1` — CAI prod OCI US East 1
+- `cai-prod-ociapac` — CAI prod OCI APAC
+- `taskflow-prod-ociuse1` — Taskflow prod OCI US East 1
+
+**Rule summary:**
+- Name has `az*` → `tE-7Jyd4z` (azure-prod-all-regions)
+- Name has `gcp*` → `ts2296v4z` (gcp-prod-all-regions)
+- Name has `oci*` → `d6fc012f-aa8e-43f8-866a-1a97e289abee` (oci-prod-all-regions)
+- Name has no cloud prefix → `000000001` or `vi-L5FKMz` (AWS)
+- Unspecified / unknown → query all 4 consolidated datasources in parallel
+
+---
 
 ### Namespace resolution rules
 
@@ -51,15 +168,20 @@ Use this discovery output to:
 | "preview" / "c360" | `.*preview.*`, `.*c360.*` |
 | "prod" / "production" | `.*prod.*` |
 | specific region (nac1, usw1, usw3, usw5) | filter pod label: `pod=~".*{region}.*"` |
-| not specified | run with **no namespace filter** (`namespace=~".*"`) or use discovered list |
+| Azure region (azusw1, azemc1, azapse1, etc.) | use datasource `tE-7Jyd4z` and namespace `.*az{region}.*` |
+| GCP region (gcpusw1, gcpmec2, gcpemw2, etc.) | use datasource `ts2296v4z` and namespace `.*gcp{region}.*` |
+| OCI region (ociuse1, ociapac, etc.) | use datasource `d6fc012f-aa8e-43f8-866a-1a97e289abee` and namespace `.*oci{region}.*` |
+| not specified | run on all 4 consolidated datasources in parallel |
 
 ### Datasource resolution rules
 
-1. Start with `000000001` (default Prometheus)
-2. If a metric returns 0.000 or no data — **do not report "no data" yet**
-3. Instead: call `list_datasources`, find all available UIDs, retry the same query on each other datasource
-4. Report which datasource returned data and use that UID for all follow-up queries
-5. Known gap: `CAI_jmxMetrics` job (JVM heap, thread pool, process acquire, rejected messages) is **not** in datasource `000000001` — it is in a separate Prometheus scrape target; find it via `list_datasources` and `get_label_values(label_name="job")`
+1. **Read the pod/namespace name first** — check for `az`, `gcp`, `oci` prefixes
+2. `az*` → `tE-7Jyd4z`; `gcp*` → `ts2296v4z`; `oci*` → `d6fc012f-aa8e-43f8-866a-1a97e289abee`; no prefix → `000000001`
+3. For ambiguous requests: query all 4 consolidated datasources (`vi-L5FKMz`, `tE-7Jyd4z`, `ts2296v4z`, `d6fc012f-aa8e-43f8-866a-1a97e289abee`) in parallel
+3. If a metric returns 0.000 on the chosen datasource — **do not report "no data" yet**
+4. Instead retry on the other cloud datasources from the mapping table above
+5. Report which datasource returned data and use that UID for all follow-up queries
+6. Known gap: `CAI_jmxMetrics` job (JVM heap, thread pool, process acquire, rejected messages) may only be in specific datasources; find it via `get_label_values(label_name="job")` on each candidate datasource
 
 ---
 
@@ -338,30 +460,43 @@ Banners irrelevant to a scenario contain `N/A -- <reason>`. This is intentional 
 ```
 auth_status → (login if expired)
   ↓
-STEP 1 — DISCOVERY (always, in parallel):
-  list_datasources
-  list_folders
-  get_label_values(label_name="namespace")
-  get_label_values(label_name="job")
-  get_label_values(label_name="pod")   ← sample to identify pod families
+STEP 1 — CLOUD ROUTING (before any query):
+  Read the pod/namespace/region in the user's request.
+  Does the name contain "az"?  → primary datasource = tE-7Jyd4z  (azure-prod-all-regions)
+                                  also check 65bC8KpMk for azusw1/azusw3 specifically
+  Does the name contain "gcp"? → primary datasource = ts2296v4z   (gcp-prod-all-regions)
+  Does the name contain "oci"? → primary datasource = d6fc012f-aa8e-43f8-866a-1a97e289abee (oci-prod-all-regions)
+  No cloud prefix?             → primary datasource = 000000001   (aws-uswest2)
+                                  also try vi-L5FKMz for multi-region AWS coverage
+  UNSPECIFIED / UNKNOWN        → query all 4 consolidated datasources in parallel:
+                                  vi-L5FKMz (AWS) + tE-7Jyd4z (Azure) + ts2296v4z (GCP) + d6fc012f-aa8e-43f8-866a-1a97e289abee (OCI)
   ↓
-STEP 2 — INTENT MAPPING:
+STEP 2 — NAMESPACE DISCOVERY on the correct datasource(s):
+  get_label_values(datasource_uid=<ROUTED_UID>, label_name="namespace")
+  get_label_values(datasource_uid=<ROUTED_UID>, label_name="job")
+  → Confirm the namespace exists in the chosen datasource before querying
+  ↓
+STEP 3 — INTENT MAPPING:
   Map user's request keywords → correct namespace(s), datasource(s), pod pattern(s)
-  e.g. "DS queue 503"  → namespace=~".*application-integration.*", pod=~".*obm.*",
-                          datasource = whichever UID has CAI_jmxMetrics job
-  e.g. "taskflow latency" → namespace=~".*taskflow.*", datasource=000000001
-  e.g. "nac1 pod"      → pod=~".*nac1.*" across all namespaces
+  e.g. "cai-prod-azusw1 error"  → datasource=tE-7Jyd4z, namespace="cai-prod-azusw1"
+  e.g. "DS queue 503"           → namespace=~".*application-integration.*", pod=~".*obm.*",
+                                   datasource = whichever UID has CAI_jmxMetrics job
+  e.g. "taskflow latency usw3"  → namespace=~"taskflow-prod-usw3", datasource=000000001
+  e.g. "nac1 pod"               → pod=~".*nac1.*" across all namespaces, try both clouds
   ↓
-STEP 3 — INVESTIGATION:
+STEP 4 — INVESTIGATION:
   Is this a diagnostic question (latency / errors / CPU / memory / pods / JVM / traffic / 503)?
-    YES → call ALL matching scenario tools with DISCOVERED namespace + datasource
+    YES → call ALL matching scenario tools with CORRECT datasource + namespace
           run in parallel; pass service_filter for pod-specific narrowing
     NO  → list_dashboards → get_dashboard_info → query_metrics / check_dashboard_health
   ↓
-STEP 4 — FILL GAPS:
-  For any metric returning 0.000 → retry on alternate datasource UIDs
-  For any namespace returning empty → broaden namespace filter
-  Report coverage gaps explicitly in FINDINGS
+STEP 5 — FILL GAPS:
+  For any metric returning 0.000 → retry on the other cloud datasources (all 4 consolidated UIDs)
+  For any namespace returning empty → broaden namespace filter or check alternate cloud
+  Never say "Azure not in scope" — Azure datasources ARE present (tE-7Jyd4z)
+  Never say "GCP not in scope" — GCP datasources ARE present (ts2296v4z)
+  Never say "OCI not in scope" — OCI datasources ARE present (d6fc012f-aa8e-43f8-866a-1a97e289abee)
+  Report coverage gaps explicitly in FINDINGS with which datasource was tried
 ```
 
 ---
