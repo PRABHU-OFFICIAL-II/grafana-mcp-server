@@ -6,9 +6,17 @@ Interact with Grafana by calling `https://grafana.cloudtrust.rocks` via MCP tool
 
 ## Step 0 — Always check auth first
 
-Call `mcp__grafana__auth_status` at the start of every Grafana conversation. If expired, call `mcp__grafana__login` with stored credentials (`ppenthoi@informatica.com`). Ask for password only if not recently provided. Approve the Okta Verify push on the phone.
+Call `mcp__grafana__auth_status` at the start of every Grafana conversation.
 
-If OKTA push is unavailable: use `mcp__grafana__inject_session` with a `grafana_session` cookie from browser DevTools (Application → Cookies → grafana_session).
+If the session is expired or missing, attempt login automatically using credentials from the `.env` file at the project root:
+- `OKTA_USERNAME` → username (fallback: `ppenthoi@informatica.com`)
+- `OKTA_PASSWORD` → password
+
+Call `mcp__grafana__login` immediately with those values — **do not ask the user for the password if `.env` contains it.** Then tell the user: "Approve the Okta Verify push on your phone."
+
+If the `.env` file is missing or `OKTA_PASSWORD` is not set (still `your_password_here` or blank), then ask the user for their OKTA password once, use it, and remind them to fill in `.env` so this is automatic next time.
+
+If OKTA push is unavailable or login fails: ask the user to inject a session cookie instead — open `https://grafana.cloudtrust.rocks` in a browser → DevTools → Application → Cookies → copy `grafana_session` value → call `mcp__grafana__inject_session`.
 
 ---
 

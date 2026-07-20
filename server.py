@@ -5,6 +5,10 @@ import asyncio
 import os
 import sys
 
+# Load .env before any config reads os.environ
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=False)
+
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
