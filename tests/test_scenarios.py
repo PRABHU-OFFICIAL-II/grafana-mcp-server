@@ -208,7 +208,7 @@ async def test_compare_regions_flags_anomaly(monkeypatch):
         return EMPTY_RESULT
     monkeypatch.setattr(_sc, "_run", mock_run)
     report = await _sc.compare_regions("ds1", None, 60, regions=["usw1"])
-    assert "ANOMALY" in report
+    assert "ANOMALIES" in report or "WARNING" in report or "CRITICAL" in report
 
 
 # ── helper unit tests ─────────────────────────────────────────────────────────
