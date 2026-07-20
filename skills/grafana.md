@@ -6,9 +6,33 @@ Interact with Grafana by calling `https://grafana.cloudtrust.rocks` via MCP tool
 
 ## Step 0 — Always check auth first
 
-Call `mcp__grafana__auth_status` at the start of every Grafana conversation. If expired, call `mcp__grafana__login` with stored credentials (`ppenthoi@informatica.com`). Ask for password only if not recently provided. Approve the Okta Verify push on the phone.
+Call `mcp__grafana__auth_status` at the start of every Grafana conversation. If the session is valid, proceed immediately.
 
-If OKTA push is unavailable: use `mcp__grafana__inject_session` with a `grafana_session` cookie from browser DevTools (Application → Cookies → grafana_session).
+If the session is **expired or missing**, follow this login flow — in order, without asking the user first:
+
+### Login flow (execute autonomously)
+
+**Step A — Read `.env` from the project directory**
+
+Use the Read tool to read the file at:
+```
+C:\Users\ppenthoi\Documents\DEV\cdi-mcp-servers\grafana-mcp-server\.env
+```
+Parse `USERNAME` and `PASSWORD` values from it. The format is `KEY=value`, one per line.
+
+**Step B — Log in with the credentials from `.env`**
+
+Call `mcp__grafana__login` with the `username` and `password` read from the `.env` file. Approve the Okta Verify push on the phone.
+
+**Step C — Fallback: ask the user (only if `.env` is missing or unreadable)**
+
+If the Read tool returns an error (file not found or unreadable), ask the user for their OKTA username and password, then call `mcp__grafana__login` with the provided values.
+
+**Do NOT ask the user for credentials if `.env` exists and contains `USERNAME`/`PASSWORD`.**
+
+### If OKTA push is unavailable
+
+Use `mcp__grafana__inject_session` with a `grafana_session` cookie from browser DevTools (Application → Cookies → grafana_session).
 
 ---
 
