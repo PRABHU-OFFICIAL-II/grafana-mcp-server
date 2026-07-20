@@ -13,6 +13,12 @@ from grafana_mcp.grafana.api import (
     query_logs,
 )
 from grafana_mcp.parser.metrics import parse_query_result, detect_anomalies, format_metrics_table
+from grafana_mcp.tools.scenarios import (
+    investigate_latency_spike, investigate_memory_pressure,
+    investigate_pod_instability, investigate_error_spike,
+    investigate_cpu_spike, investigate_traffic_drop,
+    investigate_jvm_health, compare_regions,
+)
 
 
 def _text(content: str) -> list:
@@ -337,6 +343,75 @@ def register_tools(server: Server) -> None:
             header = f"Found {len(datasources)} datasources:\n\nUID                    Type             Name\n{'─' * 70}"
             return _text(f"{header}\n" + "\n".join(lines))
 
+        # ── Scenario / investigation tools ────────────────────────────────────
+
+        elif name == "investigate_latency_spike":
+            report = await investigate_latency_spike(
+                datasource_uid=arguments["datasource_uid"],
+                namespace=arguments.get("namespace"),
+                range_minutes=arguments.get("range_minutes", 60),
+                service_filter=arguments.get("service_filter", ""),
+            )
+            return _text(report)
+
+        elif name == "investigate_memory_pressure":
+            report = await investigate_memory_pressure(
+                datasource_uid=arguments["datasource_uid"],
+                namespace=arguments.get("namespace"),
+                range_minutes=arguments.get("range_minutes", 60),
+            )
+            return _text(report)
+
+        elif name == "investigate_pod_instability":
+            report = await investigate_pod_instability(
+                datasource_uid=arguments["datasource_uid"],
+                namespace=arguments.get("namespace"),
+                range_minutes=arguments.get("range_minutes", 60),
+            )
+            return _text(report)
+
+        elif name == "investigate_error_spike":
+            report = await investigate_error_spike(
+                datasource_uid=arguments["datasource_uid"],
+                namespace=arguments.get("namespace"),
+                range_minutes=arguments.get("range_minutes", 60),
+            )
+            return _text(report)
+
+        elif name == "investigate_cpu_spike":
+            report = await investigate_cpu_spike(
+                datasource_uid=arguments["datasource_uid"],
+                namespace=arguments.get("namespace"),
+                range_minutes=arguments.get("range_minutes", 60),
+            )
+            return _text(report)
+
+        elif name == "investigate_traffic_drop":
+            report = await investigate_traffic_drop(
+                datasource_uid=arguments["datasource_uid"],
+                namespace=arguments.get("namespace"),
+                range_minutes=arguments.get("range_minutes", 60),
+            )
+            return _text(report)
+
+        elif name == "investigate_jvm_health":
+            report = await investigate_jvm_health(
+                datasource_uid=arguments["datasource_uid"],
+                namespace=arguments.get("namespace"),
+                range_minutes=arguments.get("range_minutes", 60),
+                job=arguments.get("job"),
+            )
+            return _text(report)
+
+        elif name == "compare_regions":
+            report = await compare_regions(
+                datasource_uid=arguments["datasource_uid"],
+                namespace=arguments.get("namespace"),
+                range_minutes=arguments.get("range_minutes", 60),
+                regions=arguments.get("regions"),
+            )
+            return _text(report)
+
         else:
             return _text(f"Unknown tool: {name}")
 
@@ -431,6 +506,74 @@ def register_tools(server: Server) -> None:
                      "query": {"type": "string", "description": "Title search string (partial match)"},
                      "tags": {"type": "array", "items": {"type": "string"}, "description": "Filter by dashboard tags"},
                  }}),
+
+            # ── Scenario tools ────────────────────────────────────────────────
+            Tool(name="investigate_latency_spike",
+                 description="Scenario: service is slow or latency spiked. Checks GC pause rate, CPU throttling, thread count, HTTP p99 latency, and request rate in one call.",
+                 inputSchema={"type": "object", "properties": {
+                     "datasource_uid": {"type": "string"},
+                     "namespace": {"type": "string", "description": "Kubernetes namespace filter (supports regex, e.g. '.*taskflow.*')"},
+                     "range_minutes": {"type": "number", "default": 60},
+                     "service_filter": {"type": "string", "description": "Extra PromQL label filter string e.g. 'job=\"my-service\"'"},
+                 }, "required": ["datasource_uid"]}),
+
+            Tool(name="investigate_memory_pressure",
+                 description="Scenario: memory concern or OOM risk. Checks JVM heap %, working set memory, OOM kills, GC frequency, and memory vs limit in one call.",
+                 inputSchema={"type": "object", "properties": {
+                     "datasource_uid": {"type": "string"},
+                     "namespace": {"type": "string"},
+                     "range_minutes": {"type": "number", "default": 60},
+                 }, "required": ["datasource_uid"]}),
+
+            Tool(name="investigate_pod_instability",
+                 description="Scenario: pods crashing or restarting. Checks restart count, CrashLoopBackOff, not-ready containers, OOM kills, and non-running phases in one call.",
+                 inputSchema={"type": "object", "properties": {
+                     "datasource_uid": {"type": "string"},
+                     "namespace": {"type": "string"},
+                     "range_minutes": {"type": "number", "default": 60},
+                 }, "required": ["datasource_uid"]}),
+
+            Tool(name="investigate_error_spike",
+                 description="Scenario: error rate jumped. Checks HTTP 4xx/5xx rate, p99 latency, pod restarts, CPU throttling, and request rate by status in one call.",
+                 inputSchema={"type": "object", "properties": {
+                     "datasource_uid": {"type": "string"},
+                     "namespace": {"type": "string"},
+                     "range_minutes": {"type": "number", "default": 60},
+                 }, "required": ["datasource_uid"]}),
+
+            Tool(name="investigate_cpu_spike",
+                 description="Scenario: CPU suddenly high. Checks CPU usage, throttle ratio, GC pressure, active thread count, and request rate in one call.",
+                 inputSchema={"type": "object", "properties": {
+                     "datasource_uid": {"type": "string"},
+                     "namespace": {"type": "string"},
+                     "range_minutes": {"type": "number", "default": 60},
+                 }, "required": ["datasource_uid"]}),
+
+            Tool(name="investigate_traffic_drop",
+                 description="Scenario: requests dropped to zero or near-zero. Checks request rate, pod ready status, unscheduled pods, network errors, and restarts in one call.",
+                 inputSchema={"type": "object", "properties": {
+                     "datasource_uid": {"type": "string"},
+                     "namespace": {"type": "string"},
+                     "range_minutes": {"type": "number", "default": 60},
+                 }, "required": ["datasource_uid"]}),
+
+            Tool(name="investigate_jvm_health",
+                 description="Scenario: JVM deep dive. Checks heap %, metaspace, GC pause time, GC collections/sec, live thread count, and thread states in one call.",
+                 inputSchema={"type": "object", "properties": {
+                     "datasource_uid": {"type": "string"},
+                     "namespace": {"type": "string"},
+                     "range_minutes": {"type": "number", "default": 60},
+                     "job": {"type": "string", "description": "Prometheus job label filter e.g. 'CAI_jmxMetrics'"},
+                 }, "required": ["datasource_uid"]}),
+
+            Tool(name="compare_regions",
+                 description="Scenario: multi-region sanity check. Runs CPU, memory, error rate, and p99 latency for each region in parallel and flags which region is the outlier.",
+                 inputSchema={"type": "object", "properties": {
+                     "datasource_uid": {"type": "string"},
+                     "namespace": {"type": "string"},
+                     "range_minutes": {"type": "number", "default": 60},
+                     "regions": {"type": "array", "items": {"type": "string"}, "description": "Region name substrings to match in pod names (default: ['usw1','usw3','usw5'])"},
+                 }, "required": ["datasource_uid"]}),
         ]
 
 
