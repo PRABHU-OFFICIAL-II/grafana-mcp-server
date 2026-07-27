@@ -12,7 +12,7 @@ _refresh_task: Optional[asyncio.Task] = None
 
 class SessionExpiredError(Exception):
     def __init__(self):
-        super().__init__("Grafana session expired or missing — call login tool first")
+        super().__init__("Grafana session could not be established — browser login failed")
 
 
 async def get_session() -> Session:
@@ -21,19 +21,37 @@ async def get_session() -> Session:
     if not _current:
         _current = load_session()
 
+    # Step 2: no saved session — try reading grafana_session from the browser cookie store
     if not _current:
-        raise SessionExpiredError()
+        from grafana_mcp.auth.browser_cookies import try_read_browser_session
+        _current = try_read_browser_session()
+
+    # Step 3: still nothing — auto-open browser for login, no prompt needed
+    if not _current:
+        print("[auth] No session found — opening browser for Okta login...", file=sys.stderr)
+        return await init_session()
 
     now_ms = int(time.time() * 1000)
     if _current.expires_at < now_ms:
-        print("[auth] Session expired — attempting silent refresh...", file=sys.stderr)
+        print("[auth] Session expired — trying browser cookie store...", file=sys.stderr)
+        from grafana_mcp.auth.browser_cookies import try_read_browser_session
+        browser_session = try_read_browser_session()
+        if browser_session:
+            _current = browser_session
+            _schedule_refresh(_current)
+            return _current
+
+        print("[auth] Attempting silent Okta refresh...", file=sys.stderr)
         from grafana_mcp.auth.okta import try_silent_refresh
         refreshed = await try_silent_refresh(_current)
         if refreshed:
             _current = refreshed
             _schedule_refresh(_current)
             return _current
-        raise SessionExpiredError()
+
+        # All automatic paths exhausted — open browser for full re-login
+        print("[auth] Silent refresh failed — opening browser for re-login...", file=sys.stderr)
+        return await init_session()
 
     if should_refresh(_current):
         snapshot = _current
@@ -44,10 +62,10 @@ async def get_session() -> Session:
     return _current
 
 
-async def init_session(username: str, password: str) -> Session:
+async def init_session() -> Session:
     global _current
     from grafana_mcp.auth.okta import login_with_okta
-    _current = await login_with_okta(username, password)
+    _current = await login_with_okta()
     _schedule_refresh(_current)
     return _current
 
@@ -90,7 +108,11 @@ async def _delayed_refresh(delay_seconds: float, session: Session) -> None:
         _current = refreshed
         _schedule_refresh(refreshed)
     else:
-        print("[auth] ⚠️  Silent refresh failed — OKTA push may be required on next request", file=sys.stderr)
+        print("[auth] Silent refresh failed — opening browser for re-login...", file=sys.stderr)
+        try:
+            _current = await init_session()
+        except Exception as e:
+            print(f"[auth] ⚠️  Browser re-login failed: {e}", file=sys.stderr)
 
 
 async def _background_refresh(session: Session) -> None:

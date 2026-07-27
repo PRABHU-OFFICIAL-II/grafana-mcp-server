@@ -12,7 +12,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), overrid
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
-from grafana_mcp.auth.manager import get_session, SessionExpiredError
+from grafana_mcp.auth.manager import get_session
 from grafana_mcp.config import config
 from grafana_mcp.tools.index import register_tools
 
@@ -24,10 +24,11 @@ HOST = os.environ.get("MCP_HOST", "0.0.0.0")
 async def warm_up_session() -> None:
     try:
         session = await get_session()
-        expires_in = round((session.expires_at - __import__("time").time() * 1000) / 60000)
-        print(f"[grafana-mcp] Session loaded, expires in {expires_in} minutes", file=sys.stderr)
-    except SessionExpiredError:
-        print("[grafana-mcp] No active session — call the 'login' tool to authenticate", file=sys.stderr)
+        import time
+        expires_in = round((session.expires_at - time.time() * 1000) / 60000)
+        print(f"[grafana-mcp] Session ready, expires in {expires_in} minutes", file=sys.stderr)
+    except Exception as e:
+        print(f"[grafana-mcp] ⚠️  Session setup failed: {e}", file=sys.stderr)
 
 
 async def start_stdio() -> None:

@@ -57,7 +57,7 @@ def register_tools(server: Server) -> None:
         try:
             return await _dispatch(name, arguments)
         except SessionExpiredError:
-            return _text("Session expired. Call the login tool to re-authenticate.")
+            return _text("⚠️ Could not establish a Grafana session — browser login may have been closed or timed out. Call the login tool to try again.")
         except RuntimeError as e:
             return _text(f"Grafana API error: {e}")
         except Exception as e:
@@ -65,7 +65,7 @@ def register_tools(server: Server) -> None:
 
     async def _dispatch(name: str, arguments: Dict[str, Any]) -> list:
         if name == "login":
-            session = await init_session(arguments["username"], arguments["password"])
+            session = await init_session()
             from datetime import datetime, timezone
             exp = datetime.fromtimestamp(session.expires_at / 1000, tz=timezone.utc).isoformat()
             return _text(f"✅ Logged in successfully. Session expires at {exp}.")
@@ -418,11 +418,8 @@ def register_tools(server: Server) -> None:
     @server.list_tools()
     async def list_tools() -> List[Tool]:
         return [
-            Tool(name="login", description="Authenticate with Grafana via OKTA. Sends an Okta Verify push to your phone.",
-                 inputSchema={"type": "object", "properties": {
-                     "username": {"type": "string", "description": "OKTA username / email"},
-                     "password": {"type": "string", "description": "OKTA password"},
-                 }, "required": ["username", "password"]}),
+            Tool(name="login", description="Authenticate with Grafana. Opens a browser window — sign in with Okta and approve the push. No credentials needed.",
+                 inputSchema={"type": "object", "properties": {}, "required": []}),
             Tool(name="inject_session", description="Manually inject a Grafana session cookie from browser DevTools.",
                  inputSchema={"type": "object", "properties": {
                      "grafana_session": {"type": "string"},

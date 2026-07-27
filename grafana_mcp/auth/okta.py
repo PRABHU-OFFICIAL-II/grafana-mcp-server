@@ -1,5 +1,4 @@
 import asyncio
-import os
 import sys
 import time
 from typing import Optional
@@ -11,45 +10,33 @@ PUSH_POLL_INTERVAL = 3.0
 PUSH_POLL_TIMEOUT = 120.0
 
 
-async def login_with_okta(username: str, password: str) -> Session:
+async def login_with_okta() -> Session:
+    """Open a visible browser window for the user to complete Okta login manually.
+
+    No credentials are passed — the user types them in the real browser and
+    approves the Okta Verify push themselves. Once they land on Grafana, we
+    capture the session and Okta cookies so silent refresh can take over.
+    """
     from playwright.async_api import async_playwright
 
-    print("[auth] Starting OKTA login flow (headless browser)...", file=sys.stderr)
-    headless = os.environ.get("OKTA_HEADLESS", "true").lower() not in ("false", "0", "no")
+    print("[auth] Opening browser for Okta login — complete sign-in in the window that appears...", file=sys.stderr)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+        # Always visible — this is the whole point. User drives the login.
+        browser = await p.chromium.launch(headless=False)
         try:
             context = await browser.new_context()
             page = await context.new_page()
 
-            print("[auth] Navigating to Grafana login...", file=sys.stderr)
-            await page.goto(f"{config.grafana.base_url}/login/generic_oauth", wait_until="domcontentloaded")
             okta_domain = config.okta.org.rstrip("/").split("//")[-1]
-            await page.wait_for_url(f"**/{okta_domain}/**", timeout=30_000)
-            print(f"[auth] On OKTA: {page.url}", file=sys.stderr)
 
-            print("[auth] Filling username...", file=sys.stderr)
-            username_field = page.locator('input[name="identifier"], #okta-signin-username, input[type="text"]').first
-            await username_field.wait_for(state="visible", timeout=15_000)
-            await username_field.fill(username)
-            next_btn = page.locator('[type="submit"], [data-type="save"], #okta-signin-submit').first
-            await next_btn.click()
-            print("[auth] Username submitted", file=sys.stderr)
+            await page.goto(f"{config.grafana.base_url}/login/generic_oauth", wait_until="domcontentloaded")
+            print(f"[auth] Browser opened — waiting for you to complete Okta login at {page.url}", file=sys.stderr)
+            print("[auth] Sign in and approve the Okta Verify push, then this will continue automatically.", file=sys.stderr)
 
-            print("[auth] Waiting for password field...", file=sys.stderr)
-            password_field = page.locator('input[type="password"], input[name="credentials.passcode"]').first
-            await password_field.wait_for(state="visible", timeout=15_000)
-            await password_field.fill(password)
-            submit_btn = page.locator('[type="submit"], [data-type="save"]').first
-            await submit_btn.click()
-            print("[auth] Password submitted — waiting for MFA push...", file=sys.stderr)
-
-            await _select_push_notification(page)
-
-            print("[auth] OKTA Verify push sent — please approve on your phone...", file=sys.stderr)
-            await _wait_for_grafana_landing(page, okta_domain)
-            print("[auth] Redirected back to Grafana — login successful", file=sys.stderr)
+            # Wait up to 5 minutes for the user to complete the full login flow
+            await _wait_for_grafana_landing(page, okta_domain, timeout=300.0)
+            print("[auth] Login detected — capturing session cookies...", file=sys.stderr)
 
             grafana_cookies = await context.cookies(config.grafana.base_url)
             okta_cookies = await context.cookies(config.okta.org)
@@ -79,6 +66,7 @@ async def login_with_okta(username: str, password: str) -> Session:
                 ],
             )
             save_session(session)
+            print("[auth] Session saved — browser will now close.", file=sys.stderr)
             return session
         finally:
             await browser.close()
@@ -104,8 +92,8 @@ async def _select_push_notification(page) -> None:
         print(f"[auth] No method selector (push may have been sent directly): {e}", file=sys.stderr)
 
 
-async def _wait_for_grafana_landing(page, okta_domain: str) -> None:
-    deadline = time.time() + PUSH_POLL_TIMEOUT
+async def _wait_for_grafana_landing(page, okta_domain: str, timeout: float = PUSH_POLL_TIMEOUT) -> None:
+    deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             url = page.url
@@ -133,7 +121,7 @@ async def _wait_for_grafana_landing(page, okta_domain: str) -> None:
 
         await asyncio.sleep(PUSH_POLL_INTERVAL)
 
-    raise RuntimeError("OKTA Verify push timed out after 2 minutes")
+    raise RuntimeError(f"Login timed out after {round(timeout / 60)} minutes — please try again")
 
 
 async def _refresh_with_prompt_none(okta_cookies: list) -> Optional[Session]:
