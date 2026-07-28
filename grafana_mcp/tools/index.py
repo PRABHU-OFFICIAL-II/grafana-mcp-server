@@ -25,6 +25,35 @@ def _text(content: str) -> list:
     return [TextContent(type="text", text=content)]
 
 
+def _parse_ist_window(arguments: Dict[str, Any]):
+    """Parse time_from / time_to IST strings into (from_ms, to_ms) or (None, None)."""
+    from datetime import datetime, timezone, timedelta
+    IST = timezone(timedelta(hours=5, minutes=30))
+    from_str = arguments.get("time_from")
+    to_str   = arguments.get("time_to")
+    if not from_str or not to_str:
+        return None, None
+    def _to_ms(s: str) -> int:
+        s = s.strip()
+        for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z",
+                    "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d %H:%M:%S.%f%z"):
+            try:
+                return int(datetime.strptime(s, fmt).timestamp() * 1000)
+            except ValueError:
+                pass
+        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
+                    "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+            try:
+                return int(datetime.strptime(s, fmt).replace(tzinfo=IST).timestamp() * 1000)
+            except ValueError:
+                pass
+        raise ValueError(f"Cannot parse time: {s!r}")
+    try:
+        return _to_ms(from_str), _to_ms(to_str)
+    except Exception:
+        return None, None
+
+
 async def _resolve_datasource(ds_ref: Optional[Dict], template_vars: List[Dict], all_ds: List[Dict]) -> Optional[Dict]:
     if not ds_ref or not ds_ref.get("uid"):
         return None
@@ -142,9 +171,15 @@ def register_tools(server: Server) -> None:
         # ── Metrics tools ─────────────────────────────────────────────────────
 
         elif name == "query_metrics":
-            range_min = arguments.get("range_minutes", 60)
-            to_ms = int(time.time() * 1000)
-            from_ms = to_ms - range_min * 60 * 1000
+            f_ms, t_ms = _parse_ist_window(arguments)
+            if f_ms is not None and t_ms is not None:
+                from_ms, to_ms = f_ms, t_ms
+                range_label = f"{arguments['time_from']} → {arguments['time_to']} IST"
+            else:
+                range_min = arguments.get("range_minutes", 60)
+                to_ms = int(time.time() * 1000)
+                from_ms = to_ms - range_min * 60 * 1000
+                range_label = f"last {range_min} minutes"
             result = await query_metrics(
                 arguments["datasource_uid"],
                 arguments.get("datasource_type", "prometheus"),
@@ -155,7 +190,7 @@ def register_tools(server: Server) -> None:
             )
             parsed = parse_query_result(result)
             return _text(
-                f"Query: {arguments['expr']}\nRange: last {range_min} minutes\n\nResults:\n"
+                f"Query: {arguments['expr']}\nRange: {range_label}\n\nResults:\n"
                 + format_metrics_table(parsed)
             )
 
@@ -346,69 +381,85 @@ def register_tools(server: Server) -> None:
         # ── Scenario / investigation tools ────────────────────────────────────
 
         elif name == "investigate_latency_spike":
+            f_ms, t_ms = _parse_ist_window(arguments)
             report = await investigate_latency_spike(
                 datasource_uid=arguments["datasource_uid"],
                 namespace=arguments.get("namespace"),
                 range_minutes=arguments.get("range_minutes", 60),
                 service_filter=arguments.get("service_filter", ""),
+                from_ms=f_ms, to_ms=t_ms,
             )
             return _text(report)
 
         elif name == "investigate_memory_pressure":
+            f_ms, t_ms = _parse_ist_window(arguments)
             report = await investigate_memory_pressure(
                 datasource_uid=arguments["datasource_uid"],
                 namespace=arguments.get("namespace"),
                 range_minutes=arguments.get("range_minutes", 60),
+                from_ms=f_ms, to_ms=t_ms,
             )
             return _text(report)
 
         elif name == "investigate_pod_instability":
+            f_ms, t_ms = _parse_ist_window(arguments)
             report = await investigate_pod_instability(
                 datasource_uid=arguments["datasource_uid"],
                 namespace=arguments.get("namespace"),
                 range_minutes=arguments.get("range_minutes", 60),
+                from_ms=f_ms, to_ms=t_ms,
             )
             return _text(report)
 
         elif name == "investigate_error_spike":
+            f_ms, t_ms = _parse_ist_window(arguments)
             report = await investigate_error_spike(
                 datasource_uid=arguments["datasource_uid"],
                 namespace=arguments.get("namespace"),
                 range_minutes=arguments.get("range_minutes", 60),
+                from_ms=f_ms, to_ms=t_ms,
             )
             return _text(report)
 
         elif name == "investigate_cpu_spike":
+            f_ms, t_ms = _parse_ist_window(arguments)
             report = await investigate_cpu_spike(
                 datasource_uid=arguments["datasource_uid"],
                 namespace=arguments.get("namespace"),
                 range_minutes=arguments.get("range_minutes", 60),
+                from_ms=f_ms, to_ms=t_ms,
             )
             return _text(report)
 
         elif name == "investigate_traffic_drop":
+            f_ms, t_ms = _parse_ist_window(arguments)
             report = await investigate_traffic_drop(
                 datasource_uid=arguments["datasource_uid"],
                 namespace=arguments.get("namespace"),
                 range_minutes=arguments.get("range_minutes", 60),
+                from_ms=f_ms, to_ms=t_ms,
             )
             return _text(report)
 
         elif name == "investigate_jvm_health":
+            f_ms, t_ms = _parse_ist_window(arguments)
             report = await investigate_jvm_health(
                 datasource_uid=arguments["datasource_uid"],
                 namespace=arguments.get("namespace"),
                 range_minutes=arguments.get("range_minutes", 60),
                 job=arguments.get("job"),
+                from_ms=f_ms, to_ms=t_ms,
             )
             return _text(report)
 
         elif name == "compare_regions":
+            f_ms, t_ms = _parse_ist_window(arguments)
             report = await compare_regions(
                 datasource_uid=arguments["datasource_uid"],
                 namespace=arguments.get("namespace"),
                 range_minutes=arguments.get("range_minutes", 60),
                 regions=arguments.get("regions"),
+                from_ms=f_ms, to_ms=t_ms,
             )
             return _text(report)
 
@@ -449,7 +500,9 @@ def register_tools(server: Server) -> None:
                      "datasource_type": {"type": "string", "default": "prometheus"},
                      "expr": {"type": "string"},
                      "legend_format": {"type": "string"},
-                     "range_minutes": {"type": "number", "default": 60},
+                     "range_minutes": {"type": "number", "default": 60, "description": "Relative window from now (ignored when time_from/time_to set)"},
+                     "time_from": {"type": "string", "description": "Absolute window start in IST, e.g. '2026-07-15 16:00:00'. Takes priority over range_minutes."},
+                     "time_to":   {"type": "string", "description": "Absolute window end in IST, e.g. '2026-07-15 18:00:00'."},
                  }, "required": ["datasource_uid", "expr"]}),
             Tool(name="detect_anomalies", description="Query a PromQL expression and detect spikes or threshold breaches.",
                  inputSchema={"type": "object", "properties": {
@@ -510,8 +563,10 @@ def register_tools(server: Server) -> None:
                  inputSchema={"type": "object", "properties": {
                      "datasource_uid": {"type": "string"},
                      "namespace": {"type": "string", "description": "Kubernetes namespace filter (supports regex, e.g. '.*taskflow.*')"},
-                     "range_minutes": {"type": "number", "default": 60},
+                     "range_minutes": {"type": "number", "default": 60, "description": "Relative window from now (ignored when time_from/time_to set)"},
                      "service_filter": {"type": "string", "description": "Extra PromQL label filter string e.g. 'job=\"my-service\"'"},
+                     "time_from": {"type": "string", "description": "Absolute window start in IST, e.g. '2026-07-15 16:00:00'. Takes priority over range_minutes."},
+                     "time_to":   {"type": "string", "description": "Absolute window end in IST, e.g. '2026-07-15 18:00:00'."},
                  }, "required": ["datasource_uid"]}),
 
             Tool(name="investigate_memory_pressure",
@@ -519,7 +574,9 @@ def register_tools(server: Server) -> None:
                  inputSchema={"type": "object", "properties": {
                      "datasource_uid": {"type": "string"},
                      "namespace": {"type": "string"},
-                     "range_minutes": {"type": "number", "default": 60},
+                     "range_minutes": {"type": "number", "default": 60, "description": "Relative window from now (ignored when time_from/time_to set)"},
+                     "time_from": {"type": "string", "description": "Absolute window start in IST, e.g. '2026-07-15 16:00:00'."},
+                     "time_to":   {"type": "string", "description": "Absolute window end in IST, e.g. '2026-07-15 18:00:00'."},
                  }, "required": ["datasource_uid"]}),
 
             Tool(name="investigate_pod_instability",
@@ -527,7 +584,9 @@ def register_tools(server: Server) -> None:
                  inputSchema={"type": "object", "properties": {
                      "datasource_uid": {"type": "string"},
                      "namespace": {"type": "string"},
-                     "range_minutes": {"type": "number", "default": 60},
+                     "range_minutes": {"type": "number", "default": 60, "description": "Relative window from now (ignored when time_from/time_to set)"},
+                     "time_from": {"type": "string", "description": "Absolute window start in IST, e.g. '2026-07-15 16:00:00'."},
+                     "time_to":   {"type": "string", "description": "Absolute window end in IST, e.g. '2026-07-15 18:00:00'."},
                  }, "required": ["datasource_uid"]}),
 
             Tool(name="investigate_error_spike",
@@ -535,7 +594,9 @@ def register_tools(server: Server) -> None:
                  inputSchema={"type": "object", "properties": {
                      "datasource_uid": {"type": "string"},
                      "namespace": {"type": "string"},
-                     "range_minutes": {"type": "number", "default": 60},
+                     "range_minutes": {"type": "number", "default": 60, "description": "Relative window from now (ignored when time_from/time_to set)"},
+                     "time_from": {"type": "string", "description": "Absolute window start in IST, e.g. '2026-07-15 16:00:00'."},
+                     "time_to":   {"type": "string", "description": "Absolute window end in IST, e.g. '2026-07-15 18:00:00'."},
                  }, "required": ["datasource_uid"]}),
 
             Tool(name="investigate_cpu_spike",
@@ -543,7 +604,9 @@ def register_tools(server: Server) -> None:
                  inputSchema={"type": "object", "properties": {
                      "datasource_uid": {"type": "string"},
                      "namespace": {"type": "string"},
-                     "range_minutes": {"type": "number", "default": 60},
+                     "range_minutes": {"type": "number", "default": 60, "description": "Relative window from now (ignored when time_from/time_to set)"},
+                     "time_from": {"type": "string", "description": "Absolute window start in IST, e.g. '2026-07-15 16:00:00'."},
+                     "time_to":   {"type": "string", "description": "Absolute window end in IST, e.g. '2026-07-15 18:00:00'."},
                  }, "required": ["datasource_uid"]}),
 
             Tool(name="investigate_traffic_drop",
@@ -551,7 +614,9 @@ def register_tools(server: Server) -> None:
                  inputSchema={"type": "object", "properties": {
                      "datasource_uid": {"type": "string"},
                      "namespace": {"type": "string"},
-                     "range_minutes": {"type": "number", "default": 60},
+                     "range_minutes": {"type": "number", "default": 60, "description": "Relative window from now (ignored when time_from/time_to set)"},
+                     "time_from": {"type": "string", "description": "Absolute window start in IST, e.g. '2026-07-15 16:00:00'."},
+                     "time_to":   {"type": "string", "description": "Absolute window end in IST, e.g. '2026-07-15 18:00:00'."},
                  }, "required": ["datasource_uid"]}),
 
             Tool(name="investigate_jvm_health",
@@ -559,8 +624,10 @@ def register_tools(server: Server) -> None:
                  inputSchema={"type": "object", "properties": {
                      "datasource_uid": {"type": "string"},
                      "namespace": {"type": "string"},
-                     "range_minutes": {"type": "number", "default": 60},
+                     "range_minutes": {"type": "number", "default": 60, "description": "Relative window from now (ignored when time_from/time_to set)"},
                      "job": {"type": "string", "description": "Prometheus job label filter e.g. 'CAI_jmxMetrics'"},
+                     "time_from": {"type": "string", "description": "Absolute window start in IST, e.g. '2026-07-15 16:00:00'."},
+                     "time_to":   {"type": "string", "description": "Absolute window end in IST, e.g. '2026-07-15 18:00:00'."},
                  }, "required": ["datasource_uid"]}),
 
             Tool(name="compare_regions",
@@ -568,8 +635,10 @@ def register_tools(server: Server) -> None:
                  inputSchema={"type": "object", "properties": {
                      "datasource_uid": {"type": "string"},
                      "namespace": {"type": "string"},
-                     "range_minutes": {"type": "number", "default": 60},
+                     "range_minutes": {"type": "number", "default": 60, "description": "Relative window from now (ignored when time_from/time_to set)"},
                      "regions": {"type": "array", "items": {"type": "string"}, "description": "Region name substrings to match in pod names (default: ['usw1','usw3','usw5'])"},
+                     "time_from": {"type": "string", "description": "Absolute window start in IST, e.g. '2026-07-15 16:00:00'."},
+                     "time_to":   {"type": "string", "description": "Absolute window end in IST, e.g. '2026-07-15 18:00:00'."},
                  }, "required": ["datasource_uid"]}),
         ]
 
