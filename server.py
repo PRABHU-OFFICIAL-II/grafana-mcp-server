@@ -12,7 +12,6 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), overrid
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
-from grafana_mcp.auth.manager import get_session
 from grafana_mcp.config import config
 from grafana_mcp.tools.index import register_tools
 
